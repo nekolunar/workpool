@@ -18,7 +18,7 @@ func TestWorkPoolInitOnce(t *testing.T) {
 		t.Fatalf("expected num idle workers: 0, got %d", x)
 	}
 
-	err := pool.Post(context.TODO(), func(context.Context) {})
+	err := pool.Submit(context.TODO(), func(context.Context) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,10 +28,10 @@ func TestWorkPoolInitOnce(t *testing.T) {
 	}
 }
 
-func TestWorkPoolPost(t *testing.T) {
+func TestWorkPoolSubmit(t *testing.T) {
 	pool := NewPool(1)
 	done := make(chan struct{})
-	pool.Post(pool.Context(), func(ctx context.Context) {
+	pool.Submit(pool.Context(), func(ctx context.Context) {
 		<-ctx.Done()
 		close(done)
 	})
@@ -41,7 +41,7 @@ func TestWorkPoolPost(t *testing.T) {
 	pool = NewPool(1)
 	done = make(chan struct{})
 	ctx, cancel := context.WithCancel(pool.Context())
-	pool.Post(ctx, func(ctx context.Context) {
+	pool.Submit(ctx, func(ctx context.Context) {
 		<-ctx.Done()
 		close(done)
 	})
@@ -59,7 +59,7 @@ func TestWorkPoolPost(t *testing.T) {
 	pool = NewPool(1)
 	done = make(chan struct{})
 	ctx, cancel = context.WithTimeout(pool.Context(), 1*time.Second)
-	pool.Post(ctx, func(ctx context.Context) {
+	pool.Submit(ctx, func(ctx context.Context) {
 		<-ctx.Done()
 		close(done)
 	})
@@ -75,14 +75,14 @@ func TestWorkPoolPost(t *testing.T) {
 	pool.Close()
 }
 
-func TestWorkPoolPostUnsafe(t *testing.T) {
+func TestWorkPoolSubmitUnsafe(t *testing.T) {
 	pool := NewPool(1)
 	defer pool.Close()
 
 	ctx0, cancel0 := context.WithCancel(context.TODO())
 	ctx1, cancel1 := context.WithTimeout(context.TODO(), 500*time.Millisecond)
 
-	err := pool.Post(ctx0, func(ctx context.Context) { <-ctx.Done() })
+	err := pool.Submit(ctx0, func(ctx context.Context) { <-ctx.Done() })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestWorkPoolPostUnsafe(t *testing.T) {
 		t.Fatalf("expected num idle workers: 0, got %d", x)
 	}
 
-	err = pool.Post(ctx1, func(context.Context) {})
+	err = pool.Submit(ctx1, func(context.Context) {})
 	if err != context.DeadlineExceeded && ctx1.Err() != context.DeadlineExceeded {
 		t.Fatalf("expected error %v, got %v", context.DeadlineExceeded, err)
 	}
@@ -115,7 +115,7 @@ func TestWorkPoolClose(t *testing.T) {
 	if err := pool.Close(); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	if err := pool.Post(context.TODO(), func(context.Context) {}); err != ErrClosed {
+	if err := pool.Submit(context.TODO(), func(context.Context) {}); err != ErrClosed {
 		t.Fatalf("expected error %v, got %v", ErrClosed, err)
 	}
 	if err := pool.Close(); err != ErrClosed {
@@ -124,11 +124,11 @@ func TestWorkPoolClose(t *testing.T) {
 
 	pool = NewPool(1)
 
-	pool.Post(pool.Context(), func(ctx context.Context) { <-ctx.Done() })
+	pool.Submit(pool.Context(), func(ctx context.Context) { <-ctx.Done() })
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
-		if err := pool.Post(ctx, func(context.Context) {}); err != ErrClosed {
+		if err := pool.Submit(ctx, func(context.Context) {}); err != ErrClosed {
 			t.Fatalf("expected error %v, got %v", ErrClosed, err)
 		}
 		cancel()
@@ -140,7 +140,7 @@ func TestWorkPoolClose(t *testing.T) {
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.TODO(), 2*time.Second)
-		if err := pool.Post(ctx, func(context.Context) {}); err != ErrClosed {
+		if err := pool.Submit(ctx, func(context.Context) {}); err != ErrClosed {
 			t.Fatalf("expected error %v, got %v", ErrClosed, err)
 		}
 		<-ctx.Done()

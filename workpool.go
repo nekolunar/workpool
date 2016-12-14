@@ -61,7 +61,7 @@ func (w worker) start(pool *WorkPool) {
 
 var ErrClosed = errors.New("workpool has been closed")
 
-func (p *WorkPool) Post(ctx context.Context, work WorkFunc) (err error) {
+func (p *WorkPool) Submit(ctx context.Context, work WorkFunc) (err error) {
 	if ctx == nil {
 		panic("nil context")
 	}
@@ -108,6 +108,6 @@ func (p *WorkPool) Close() (err error) {
 
 var defaultPool = NewPool(0)
 
-func Post(ctx context.Context, work WorkFunc) error {
-	return defaultPool.Post(ctx, work)
+func Submit(ctx context.Context, work WorkFunc) error {
+	return defaultPool.Submit(ctx, work)
 }
