@@ -54,6 +54,7 @@ func TestWorkPoolPost(t *testing.T) {
 	if err := pool.Context().Err(); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
+	pool.Close()
 
 	pool = NewPool(1)
 	done = make(chan struct{})
@@ -71,6 +72,7 @@ func TestWorkPoolPost(t *testing.T) {
 	if err := pool.Context().Err(); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
+	pool.Close()
 }
 
 func TestWorkPoolPostUnsafe(t *testing.T) {
