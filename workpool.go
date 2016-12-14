@@ -7,15 +7,17 @@ import (
 	"sync"
 )
 
-type WorkFunc func(ctx context.Context)
+type WorkFunc func(context.Context)
 
 type entry struct {
 	work WorkFunc
 	ctx  context.Context
 }
 
+type worker chan *entry
+
 type WorkPool struct {
-	ch     chan *entry
+	ch     chan worker
 	wg     sync.WaitGroup
 	once   sync.Once
 	ctx    context.Context
@@ -28,9 +30,32 @@ func NewPool(size int) *WorkPool {
 	}
 	ctx, cancel := context.WithCancel(context.TODO())
 	return &WorkPool{
-		ch:     make(chan *entry, size),
+		ch:     make(chan worker, size),
 		ctx:    ctx,
 		cancel: cancel,
+	}
+}
+
+func (w worker) start(pool *WorkPool) {
+	defer func() {
+		pool.wg.Done()
+		close(w)
+	}()
+
+	for {
+		select {
+		case <-pool.ctx.Done():
+			return
+		default:
+			pool.ch <- w
+		}
+
+		select {
+		case e := <-w:
+			e.work(e.ctx)
+		case <-pool.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -44,26 +69,23 @@ func (p *WorkPool) Post(ctx context.Context, work WorkFunc) (err error) {
 	p.once.Do(func() {
 		p.wg.Add(cap(p.ch))
 		for i := 0; i < cap(p.ch); i++ {
-			go func() {
-				defer p.wg.Done()
-				for e := range p.ch {
-					select {
-					case <-p.ctx.Done():
-						return
-					default:
-						e.work(e.ctx)
-					}
-				}
-			}()
+			w := make(worker)
+			go w.start(p)
 		}
 	})
 
 	select {
-	case p.ch <- &entry{work, ctx}:
-	case <-p.ctx.Done():
-		err = ErrClosed
+	case w := <-p.ch:
+		select {
+		case <-p.ctx.Done():
+			err = ErrClosed
+		default:
+			w <- &entry{work, ctx}
+		}
 	case <-ctx.Done():
 		err = ctx.Err()
+	case <-p.ctx.Done():
+		err = ErrClosed
 	}
 	return
 }
@@ -78,8 +100,8 @@ func (p *WorkPool) Close() (err error) {
 		err = ErrClosed
 	default:
 		p.cancel()
-		close(p.ch)
 		p.wg.Wait()
+		close(p.ch)
 	}
 	return
 }
