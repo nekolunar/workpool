@@ -5,14 +5,21 @@ import (
 	"errors"
 	"runtime"
 	"sync"
+	"time"
 )
 
 type WorkFunc func(context.Context)
 
 type entry struct {
-	work WorkFunc
-	ctx  context.Context
+	ctx    context.Context
+	work   WorkFunc
+	time   time.Time
+	period time.Duration
+	seq    int64
+	idx    int
 }
+
+type queue []*entry
 
 type worker chan *entry
 
@@ -80,7 +87,7 @@ func (p *WorkPool) Submit(ctx context.Context, work WorkFunc) (err error) {
 		case <-p.ctx.Done():
 			err = ErrClosed
 		default:
-			w <- &entry{work, ctx}
+			w <- &entry{ctx: ctx, work: work}
 		}
 	case <-ctx.Done():
 		err = ctx.Err()
@@ -104,6 +111,45 @@ func (p *WorkPool) Close() (err error) {
 		close(p.ch)
 	}
 	return
+}
+
+func (q queue) Len() int {
+	return len(q)
+}
+
+func (q queue) Less(i, j int) bool {
+	switch {
+	case q[i].time.Before(q[j].time):
+		return true
+	case q[i].time.After(q[j].time):
+		return false
+	case q[i].seq < q[j].seq:
+		return true
+	default:
+		return false
+	}
+}
+
+func (q queue) Swap(i, j int) {
+	q[i], q[j] = q[j], q[i]
+	q[i].idx = i
+	q[j].idx = j
+}
+
+func (q *queue) Push(x interface{}) {
+	n := len(*q)
+	e := x.(*entry)
+	e.idx = n
+	*q = append(*q, e)
+}
+
+func (q *queue) Pop() interface{} {
+	old := *q
+	n := len(old)
+	e := old[n-1]
+	e.idx = -1
+	*q = old[0 : n-1]
+	return e
 }
 
 var defaultPool = NewPool(0)
