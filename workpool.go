@@ -1,32 +1,35 @@
 package workpool
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type WorkFunc func(context.Context)
 
-type entry struct {
+type task struct {
 	ctx    context.Context
-	work   WorkFunc
-	time   time.Time
+	f      WorkFunc
+	when   time.Time
 	period time.Duration
-	seq    int64
+	seq    uint64
 	idx    int
 }
 
-type queue []*entry
-
-type worker chan *entry
+type queue []*task
 
 type WorkPool struct {
-	ch     chan worker
-	wg     sync.WaitGroup
-	once   sync.Once
+	l      sync.Mutex
+	n      int32
+	r      int64
+	t      *time.Timer
+	q      queue
+	qwait  sync.Cond
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -35,66 +38,109 @@ func NewPool(size int) *WorkPool {
 	if size <= 0 {
 		size = runtime.NumCPU()
 	}
-	ctx, cancel := context.WithCancel(context.TODO())
-	return &WorkPool{
-		ch:     make(chan worker, size),
-		ctx:    ctx,
-		cancel: cancel,
-	}
-}
+	p := new(WorkPool)
+	p.n = int32(size)
+	p.t = time.NewTimer(0)
+	p.qwait.L = &p.l
+	p.ctx, p.cancel = context.WithCancel(context.Background())
 
-func (w worker) start(pool *WorkPool) {
-	defer func() {
-		pool.wg.Done()
-		close(w)
+	<-p.t.C
+
+	go func() {
+		for {
+			select {
+			case <-p.ctx.Done():
+				return
+			case <-p.t.C:
+				p.l.Lock()
+				p.qwait.Signal()
+				p.l.Unlock()
+			}
+		}
 	}()
 
-	for {
-		select {
-		case <-pool.ctx.Done():
-			return
-		default:
-			pool.ch <- w
-		}
+	return p
+}
 
-		select {
-		case e := <-w:
-			e.work(e.ctx)
-		case <-pool.ctx.Done():
-			return
-		}
-	}
+var seq uint64
+
+func (p *WorkPool) Submit(ctx context.Context, work WorkFunc) error {
+	return p.do(&task{ctx: ctx, f: work, when: time.Now(), seq: atomic.AddUint64(&seq, 1)})
+}
+
+func (p *WorkPool) Schedule(ctx context.Context, work WorkFunc, delay, period time.Duration) error {
+	return p.do(&task{ctx: ctx, f: work, when: time.Now().Add(delay), period: period, seq: atomic.AddUint64(&seq, 1)})
 }
 
 var ErrClosed = errors.New("workpool has been closed")
 
-func (p *WorkPool) Submit(ctx context.Context, work WorkFunc) (err error) {
-	if ctx == nil {
-		panic("nil context")
-	}
-
-	p.once.Do(func() {
-		p.wg.Add(cap(p.ch))
-		for i := 0; i < cap(p.ch); i++ {
-			w := make(worker)
-			go w.start(p)
-		}
-	})
-
+func (p *WorkPool) do(t *task) error {
 	select {
-	case w := <-p.ch:
-		select {
-		case <-p.ctx.Done():
-			err = ErrClosed
-		default:
-			w <- &entry{ctx: ctx, work: work}
-		}
-	case <-ctx.Done():
-		err = ctx.Err()
+	case <-t.ctx.Done():
+		return t.ctx.Err()
 	case <-p.ctx.Done():
-		err = ErrClosed
+		return ErrClosed
+	default:
 	}
-	return
+
+	p.l.Lock()
+	heap.Push(&p.q, t)
+	p.qwait.Signal()
+	p.l.Unlock()
+
+	for {
+		n := atomic.LoadInt32(&p.n)
+		if n <= 0 {
+			return nil
+		}
+		if atomic.CompareAndSwapInt32(&p.n, n, n-1) {
+			break
+		}
+	}
+
+	go func() {
+		var t *task
+		for {
+			p.l.Lock()
+		wait:
+			for {
+				select {
+				case <-p.ctx.Done():
+					p.l.Unlock()
+					return
+				default:
+				}
+				if p.q.Len() > 0 {
+					t = p.q[0]
+					d := t.when.Sub(time.Now())
+					if d <= 0 {
+						heap.Remove(&p.q, 0)
+						p.r = 0
+						break wait
+					}
+					r := t.when.UnixNano()
+					if p.r == 0 || p.r > r {
+						p.t.Reset(d)
+						p.r = r
+					}
+				}
+				p.qwait.Wait()
+			}
+			if p.q.Len() > 0 {
+				p.qwait.Signal()
+			}
+			p.l.Unlock()
+			if t != nil {
+				t.f(t.ctx)
+				if t.period > 0 {
+					t.when = t.when.Add(t.period)
+					p.do(t)
+				}
+			}
+		}
+	}()
+
+	return nil
 }
 
 func (p *WorkPool) Context() context.Context {
@@ -107,8 +153,10 @@ func (p *WorkPool) Close() (err error) {
 		err = ErrClosed
 	default:
 		p.cancel()
-		p.wg.Wait()
-		close(p.ch)
+		p.l.Lock()
+		p.t.Stop()
+		p.qwait.Broadcast()
+		p.l.Unlock()
 	}
 	return
 }
@@ -119,9 +167,9 @@ func (q queue) Len() int {
 
 func (q queue) Less(i, j int) bool {
 	switch {
-	case q[i].time.Before(q[j].time):
+	case q[i].when.Before(q[j].when):
 		return true
-	case q[i].time.After(q[j].time):
+	case q[i].when.After(q[j].when):
 		return false
 	case q[i].seq < q[j].seq:
 		return true
@@ -138,22 +186,16 @@ func (q queue) Swap(i, j int) {
 
 func (q *queue) Push(x interface{}) {
 	n := len(*q)
-	e := x.(*entry)
-	e.idx = n
-	*q = append(*q, e)
+	t := x.(*task)
+	t.idx = n
+	*q = append(*q, t)
 }
 
 func (q *queue) Pop() interface{} {
 	old := *q
 	n := len(old)
-	e := old[n-1]
-	e.idx = -1
+	t := old[n-1]
+	t.idx = -1
 	*q = old[0 : n-1]
-	return e
-}
-
-var defaultPool = NewPool(0)
-
-func Submit(ctx context.Context, work WorkFunc) error {
-	return defaultPool.Submit(ctx, work)
+	return t
 }
