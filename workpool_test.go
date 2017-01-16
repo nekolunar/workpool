@@ -12,7 +12,7 @@ func TestWorkPoolSize(t *testing.T) {
 	pool := NewPool(0)
 	defer pool.Close()
 
-	if int(pool.n) != runtime.NumCPU() {
+	if pool.n != runtime.NumCPU() {
 		t.Fatalf("expected default num workers %d, got %d", runtime.NumCPU(), pool.n)
 	}
 	var wg sync.WaitGroup

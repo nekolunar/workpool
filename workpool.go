@@ -25,7 +25,7 @@ type queue []*task
 
 type WorkPool struct {
 	l      sync.Mutex
-	n      int32
+	n      int
 	r      int64
 	t      *time.Timer
 	q      queue
@@ -39,7 +39,7 @@ func NewPool(size int) *WorkPool {
 		size = runtime.NumCPU()
 	}
 	p := new(WorkPool)
-	p.n = int32(size)
+	p.n = size
 	p.t = time.NewTimer(0)
 	p.qwait.L = &p.l
 	p.ctx, p.cancel = context.WithCancel(context.Background())
@@ -86,17 +86,12 @@ func (p *WorkPool) do(t *task) error {
 	p.l.Lock()
 	heap.Push(&p.q, t)
 	p.qwait.Signal()
-	p.l.Unlock()
-
-	for {
-		n := atomic.LoadInt32(&p.n)
-		if n <= 0 {
-			return nil
-		}
-		if atomic.CompareAndSwapInt32(&p.n, n, n-1) {
-			break
-		}
+	if p.n == 0 {
+		p.l.Unlock()
+		return nil
 	}
+	p.n--
+	p.l.Unlock()
 
 	go func() {
 		var t *task
