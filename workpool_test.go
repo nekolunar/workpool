@@ -3,117 +3,102 @@ package workpool
 import (
 	"context"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
 
-func TestWorkPoolInitOnce(t *testing.T) {
+func TestWorkPoolSize(t *testing.T) {
 	pool := NewPool(0)
 	defer pool.Close()
 
-	if x := cap(pool.ch); x != runtime.NumCPU() {
-		t.Fatalf("expected num workers: %d, got %d", runtime.NumCPU(), x)
+	if pool.n != runtime.NumCPU() {
+		t.Fatalf("expected default num workers %d, got %d", runtime.NumCPU(), pool.n)
 	}
-	if x := len(pool.ch); x != 0 {
-		t.Fatalf("expected num idle workers: 0, got %d", x)
+	var wg sync.WaitGroup
+	for i := 0; i < runtime.NumCPU()*10; i++ {
+		wg.Add(1)
+		go func() {
+			pool.Submit(context.TODO(), func(context.Context) { wg.Done() })
+		}()
 	}
-
-	err := pool.Submit(context.TODO(), func(context.Context) {})
-	if err != nil {
-		t.Fatal(err)
+	wg.Wait()
+	if pool.n != 0 {
+		t.Fatalf("expected remaining worker count 0, got %d", pool.n)
 	}
-	time.Sleep(10 * time.Millisecond)
-	if x := len(pool.ch); x != runtime.NumCPU() {
-		t.Fatalf("expected num idle workers: %d, got %d", runtime.NumCPU(), x)
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			pool.Submit(pool.Context(), func(ctx context.Context) { <-ctx.Done() })
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	if x := 100 - pool.q.Len(); x != runtime.NumCPU() {
+		t.Fatalf("expected running workers %d, got %d", runtime.NumCPU(), x)
 	}
 }
 
 func TestWorkPoolSubmit(t *testing.T) {
 	pool := NewPool(1)
-	done := make(chan struct{})
-	pool.Submit(pool.Context(), func(ctx context.Context) {
-		<-ctx.Done()
-		close(done)
-	})
-	pool.Close()
-	<-done
+	defer pool.Close()
 
-	pool = NewPool(1)
-	done = make(chan struct{})
+	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(pool.Context())
+
 	pool.Submit(ctx, func(ctx context.Context) {
 		<-ctx.Done()
 		close(done)
 	})
 	cancel()
-	<-ctx.Done()
 	<-done
 	if err := ctx.Err(); err != context.Canceled {
 		t.Fatalf("expected error %v, got %v", context.Canceled, err)
 	}
 	if err := pool.Context().Err(); err != nil {
-		t.Fatalf("expected nil error, got %v", err)
+		t.Fatalf("expected nil, got %v", err)
 	}
-	pool.Close()
 
-	pool = NewPool(1)
 	done = make(chan struct{})
-	ctx, cancel = context.WithTimeout(pool.Context(), 1*time.Second)
+	ctx, cancel = context.WithTimeout(pool.Context(), 500*time.Millisecond)
+	defer cancel()
+
 	pool.Submit(ctx, func(ctx context.Context) {
 		<-ctx.Done()
 		close(done)
 	})
-	<-ctx.Done()
 	<-done
-	cancel()
 	if err := ctx.Err(); err != context.DeadlineExceeded {
 		t.Fatalf("expected error %v, got %v", context.DeadlineExceeded, err)
 	}
 	if err := pool.Context().Err(); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	pool.Close()
 }
 
-func TestWorkPoolSubmitUnsafe(t *testing.T) {
+func TestWorkPoolSchedule(t *testing.T) {
 	pool := NewPool(1)
 	defer pool.Close()
 
-	ctx0, cancel0 := context.WithCancel(context.TODO())
-	ctx1, cancel1 := context.WithTimeout(context.TODO(), 500*time.Millisecond)
-
-	err := pool.Submit(ctx0, func(ctx context.Context) { <-ctx.Done() })
-	if err != nil {
-		t.Fatal(err)
+	var wg sync.WaitGroup
+	wg.Add(10)
+	when := time.Now()
+	task := &task{ctx: pool.Context(), when: when, period: 100 * time.Millisecond, seq: 1}
+	task.f = func(context.Context) {
+		defer wg.Done()
+		if !task.when.Equal(when) {
+			t.Fatalf("expected %s, got %s", task.when, when)
+		}
+		when = when.Add(task.period)
 	}
-	if x := len(pool.ch); x != 0 {
-		t.Fatalf("expected num idle workers: 0, got %d", x)
-	}
-
-	err = pool.Submit(ctx1, func(context.Context) {})
-	if err != context.DeadlineExceeded && ctx1.Err() != context.DeadlineExceeded {
-		t.Fatalf("expected error %v, got %v", context.DeadlineExceeded, err)
-	}
-	cancel1()
-
-	if x := len(pool.ch); x != 0 {
-		t.Fatalf("expected num idle workers: 0, got %d", x)
-	}
-	cancel0()
-	<-ctx0.Done()
-	if err = ctx0.Err(); err != context.Canceled {
-		t.Fatalf("expected error %v, got %v", context.Canceled, err)
-	}
-	time.Sleep(10 * time.Millisecond)
-	if x := len(pool.ch); x != 1 {
-		t.Fatalf("expected num idle workers: 1, got %d", x)
-	}
+	pool.do(task)
+	wg.Wait()
 }
 
 func TestWorkPoolClose(t *testing.T) {
 	pool := NewPool(1)
 	if err := pool.Close(); err != nil {
-		t.Fatalf("expected nil error, got %v", err)
+		t.Fatalf("expected nil, got %v", err)
 	}
 	if err := pool.Submit(context.TODO(), func(context.Context) {}); err != ErrClosed {
 		t.Fatalf("expected error %v, got %v", ErrClosed, err)
@@ -123,38 +108,18 @@ func TestWorkPoolClose(t *testing.T) {
 	}
 
 	pool = NewPool(1)
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(pool.Context())
+	defer cancel()
 
-	pool.Submit(pool.Context(), func(ctx context.Context) { <-ctx.Done() })
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
-		if err := pool.Submit(ctx, func(context.Context) {}); err != ErrClosed {
-			t.Fatalf("expected error %v, got %v", ErrClosed, err)
-		}
-		cancel()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	pool.Submit(ctx, func(ctx context.Context) {
+		wg.Done()
 		<-ctx.Done()
-		if err := ctx.Err(); err != context.Canceled {
-			t.Fatalf("expected error %v, got %v", context.Canceled, err)
-		}
-	}()
-
-	go func() {
-		ctx, cancel := context.WithTimeout(context.TODO(), 2*time.Second)
-		if err := pool.Submit(ctx, func(context.Context) {}); err != ErrClosed {
-			t.Fatalf("expected error %v, got %v", ErrClosed, err)
-		}
-		<-ctx.Done()
-		if err := ctx.Err(); err != context.DeadlineExceeded {
-			t.Fatalf("expected error %v, got %v", context.DeadlineExceeded, err)
-		}
-		cancel()
-	}()
-
+		close(done)
+	})
+	wg.Wait()
 	pool.Close()
-
-	ctx := pool.Context()
-	<-ctx.Done()
-	if err := ctx.Err(); err != context.Canceled {
-		t.Fatalf("expected error %v, got %v", context.Canceled, err)
-	}
+	<-done
 }
