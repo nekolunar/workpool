@@ -34,7 +34,11 @@ type WorkPool struct {
 	cancel context.CancelFunc
 }
 
-func NewPool(size int) *WorkPool {
+func NewPool() *WorkPool {
+	return NewPoolSize(0)
+}
+
+func NewPoolSize(size int) *WorkPool {
 	if size <= 0 {
 		size = runtime.NumCPU()
 	}

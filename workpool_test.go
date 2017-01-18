@@ -9,7 +9,7 @@ import (
 )
 
 func TestWorkPoolSize(t *testing.T) {
-	pool := NewPool(0)
+	pool := NewPool()
 	defer pool.Close()
 
 	if pool.n != runtime.NumCPU() {
@@ -40,7 +40,7 @@ func TestWorkPoolSize(t *testing.T) {
 }
 
 func TestWorkPoolSubmit(t *testing.T) {
-	pool := NewPool(1)
+	pool := NewPool()
 	defer pool.Close()
 
 	done := make(chan struct{})
@@ -77,7 +77,7 @@ func TestWorkPoolSubmit(t *testing.T) {
 }
 
 func TestWorkPoolSchedule(t *testing.T) {
-	pool := NewPool(1)
+	pool := NewPool()
 	defer pool.Close()
 
 	var wg sync.WaitGroup
@@ -96,7 +96,7 @@ func TestWorkPoolSchedule(t *testing.T) {
 }
 
 func TestWorkPoolClose(t *testing.T) {
-	pool := NewPool(1)
+	pool := NewPool()
 	if err := pool.Close(); err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -107,7 +107,7 @@ func TestWorkPoolClose(t *testing.T) {
 		t.Fatalf("expected error %v, got %v", ErrClosed, err)
 	}
 
-	pool = NewPool(1)
+	pool = NewPool()
 	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(pool.Context())
 	defer cancel()
